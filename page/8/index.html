@@ -180,7 +180,7 @@
             
 
   
-    <article id="post-Mysql_sharding_note" class="article article-type-post  article-index" itemscope itemprop="blogPost">
+    <article id="post-Mysql_note" class="article article-type-post  article-index" itemscope itemprop="blogPost">
   <div class="article-inner">
     
       <header class="article-header">
@@ -188,7 +188,7 @@
   
     <h1 itemprop="name">
 	
-	  <a class="article-title" href="/2022/10/01/Mysql_sharding_note/" target="_blank">Mysql分片笔记</a>
+	  <a class="article-title" href="/2022/10/01/Mysql_note/" target="_blank">Mysql笔记</a>
   
     </h1>
   
@@ -196,7 +196,7 @@
 
   
   
-<a href="/2022/10/01/Mysql_sharding_note/" class="archive-article-date">
+<a href="/2022/10/01/Mysql_note/" class="archive-article-date">
         <time datetime="2022-10-01T04:00:00.000Z" itemprop="datePublished"><i class="icon-calendar icon"></i>2022-10-01</time>
 </a>
 
@@ -210,609 +210,13 @@
   <div class="article-entry" itemprop="articleBody">
     
     <p>[TOC]</p>
-<h1 id="主从集群"><a href="#主从集群" class="headerlink" title="主从集群"></a>主从集群</h1><p>即在主库上打开Binlog日志，记录对数据的每一步操作。然后在从库上打开RelayLog日志，用来记录跟主库一样的Binlog日志，并将RelayLog中的操作日志在自己数据库中进行重演。这样就能够更加实时的保证主库与从库的数据一致。</p>
-<p>在从库上启动一系列IO线程，负责与主库建立TCP连接，请求主库在写入Binlog日志时，也往从库传输一份。这时，主库上会有一个IO Dump线程，负责将Binlog日志通过这些TCP连接传输给从库的IO线程。而从库为了保证日志接收的稳定性，并不会立即重演Binlog数据操作，而是先将接收到的Binlog日志写入到自己的RelayLog日志当中。然后SQL线程再异步的重演RelayLog中的数据操作。</p>
-<h2 id="搭建"><a href="#搭建" class="headerlink" title="搭建"></a>搭建</h2><p>搭建主从集群的多个服务，有两个必要的条件。</p>
-<p>1、MySQL版本必须一致。</p>
-<p>2、集群中各个服务器的时间需要同步。</p>
-<h3 id="配置master主服务"><a href="#配置master主服务" class="headerlink" title="配置master主服务"></a>配置master主服务</h3><p>首先，配置主节点的mysql配置文件： &#x2F;etc&#x2F;my.cnf(没有的话就手动创建一个)</p>
-<p> 这一步需要对master进行配置，主要是需要打开binlog日志，以及指定severId。我们打开MySQL主服务的my.cnf文件，在文件中一行server-id以及一个关闭域名解析的配置。然后重启服务。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line">[mysqld]</span><br><span class="line">server-id=47</span><br><span class="line">#开启binlog</span><br><span class="line">log_bin=master-bin</span><br><span class="line">log_bin-index=master-bin.index</span><br><span class="line">skip-name-resolve</span><br><span class="line"># 设置连接端口</span><br><span class="line">port=3306</span><br><span class="line"># 设置mysql的安装目录</span><br><span class="line">basedir=/usr/local/mysql</span><br><span class="line"># 设置mysql数据库的数据的存放目录</span><br><span class="line">datadir=/usr/local/mysql/mysql-files</span><br><span class="line"># 允许最大连接数</span><br><span class="line">max_connections=200</span><br><span class="line"># 允许连接失败的次数。</span><br><span class="line">max_connect_errors=10</span><br><span class="line"># 服务端使用的字符集默认为UTF8</span><br><span class="line">character-set-server=utf8</span><br><span class="line"># 创建新表时将使用的默认存储引擎</span><br><span class="line">default-storage-engine=INNODB</span><br><span class="line"># 默认使用“mysql_native_password”插件认证</span><br><span class="line">#mysql_native_password</span><br><span class="line">default_authentication_plugin=mysql_native_password</span><br></pre></td></tr></table></figure>
-
-<blockquote>
-<p>配置说明：主要需要修改的是以下几个属性：</p>
-<p>server-id：服务节点的唯一标识。需要给集群中的每个服务分配一个单独的ID。</p>
-<p>log_bin：打开Binlog日志记录，并指定文件名。</p>
-<p>log_bin-index：Binlog日志文件</p>
-</blockquote>
-<p>重启MySQL服务，<code>service mysqld restart</code></p>
-<p>然后，我们需要给root用户分配一个replication slave的权限。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line">#登录主数据库</span><br><span class="line">mysql -u root -p</span><br><span class="line">GRANT REPLICATION SLAVE ON *.* TO &#x27;root&#x27;@&#x27;%&#x27;;</span><br><span class="line">flush privileges;</span><br><span class="line">#查看主节点同步状态：</span><br><span class="line">show master status;</span><br></pre></td></tr></table></figure>
-
-<blockquote>
-<p>在实际生产环境中，通常不会直接使用root用户，而会创建一个拥有全部权限的用户来负责主从同步。</p>
-</blockquote>
-<p><img src="/img%5Cmysql%5Cmysql21.png" alt="clipboard"></p>
-<p>这个指令结果中的File和Position记录的是当前日志的binlog文件以及文件中的索引。</p>
-<p> 而后面的Binlog_Do_DB和Binlog_Ignore_DB这两个字段是表示需要记录binlog文件的库以及不需要记录binlog文件的库。目前我们没有进行配置，就表示是针对全库记录日志。</p>
-<blockquote>
-<p>开启binlog后，数据库中的所有操作都会被记录到datadir当中，以一组轮询文件的方式循环记录。而指令查到的File和Position就是当前日志的文件和位置。而在后面配置从服务时，就需要通过这个File和Position通知从服务从哪个地方开始记录binLog。。</p>
-</blockquote>
-<h3 id="配置slave从服务"><a href="#配置slave从服务" class="headerlink" title="配置slave从服务"></a>配置slave从服务</h3><p>修改配置文件：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br></pre></td><td class="code"><pre><span class="line">[mysqld]</span><br><span class="line">#主库和从库需要不一致</span><br><span class="line">server-id=48</span><br><span class="line">#打开MySQL中继日志</span><br><span class="line">relay-log-index=slave-relay-bin.index</span><br><span class="line">relay-log=slave-relay-bin</span><br><span class="line">#打开从服务二进制日志</span><br><span class="line">log-bin=mysql-bin</span><br><span class="line">#使得更新的数据写进二进制日志中</span><br><span class="line">log-slave-updates=1</span><br><span class="line"># 设置3306端口</span><br><span class="line">port=3306</span><br><span class="line"># 设置mysql的安装目录</span><br><span class="line">basedir=/usr/local/mysql</span><br><span class="line"># 设置mysql数据库的数据的存放目录</span><br><span class="line">datadir=/usr/local/mysql/mysql-files</span><br><span class="line"># 允许最大连接数</span><br><span class="line">max_connections=200</span><br><span class="line"># 允许连接失败的次数。</span><br><span class="line">max_connect_errors=10</span><br><span class="line"># 服务端使用的字符集默认为UTF8</span><br><span class="line">character-set-server=utf8</span><br><span class="line"># 创建新表时将使用的默认存储引擎</span><br><span class="line">default-storage-engine=INNODB</span><br><span class="line"># 默认使用“mysql_native_password”插件认证</span><br><span class="line">#mysql_native_password</span><br><span class="line">default_authentication_plugin=mysql_native_password</span><br></pre></td></tr></table></figure>
-
-<blockquote>
-<p>配置说明：主要需要关注的几个属性：</p>
-<p>server-id：服务节点的唯一标识</p>
-<p>relay-log：打开从服务的relay-log日志。</p>
-<p>log-bin：打开从服务的bin-log日志记录。</p>
-</blockquote>
-<p>然后我们启动mysqls的服务，并设置他的主节点同步状态。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line">#登录从服务</span><br><span class="line">mysql -u root -p;</span><br><span class="line">#设置同步主节点：</span><br><span class="line">CHANGE MASTER TO</span><br><span class="line">MASTER_HOST=&#x27;192.168.232.128&#x27;,</span><br><span class="line">MASTER_PORT=3306,</span><br><span class="line">MASTER_USER=&#x27;root&#x27;,</span><br><span class="line">MASTER_PASSWORD=&#x27;root&#x27;,</span><br><span class="line">MASTER_LOG_FILE=&#x27;master-bin.000004&#x27;,</span><br><span class="line">MASTER_LOG_POS=156,</span><br><span class="line">GET_MASTER_PUBLIC_KEY=1;</span><br><span class="line">#开启slave</span><br><span class="line">start slave;</span><br><span class="line">#查看主从同步状态</span><br><span class="line">show slave status;</span><br></pre></td></tr></table></figure>
-
-<blockquote>
-<p>注意，CHANGE MASTER指令中需要指定的MASTER_LOG_FILE和MASTER_LOG_POS必须与主服务中查到的保持一致。</p>
-<p>并且后续如果要检查主从架构是否成功，也可以通过检查主服务与从服务之间的File和Position这两个属性是否一致来确定。</p>
-<p>另外，这个主从架构是有可能失败的，如果在slave从服务上查看slave状态，发现Slave_SQL_Running&#x3D;no，就表示主从同步失败了。这有可能是因为在从数据库上进行了写操作，与同步过来的SQL操作冲突了，也有可能是slave从服务重启后有事务回滚了。</p>
-<p>如果是因为slave从服务事务回滚的原因，可以按照以下方式重启主从同步：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; stop slave ;</span><br><span class="line">mysql&gt; set GLOBAL SQL_SLAVE_SKIP_COUNTER=1;</span><br><span class="line">mysql&gt; start slave ;</span><br></pre></td></tr></table></figure>
-
-<p>而另一种解决方式就是重新记录主节点的binlog文件消息</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; stop slave ;</span><br><span class="line">mysql&gt; change master to .....</span><br><span class="line">mysql&gt; start slave ;</span><br></pre></td></tr></table></figure>
-
-<p>但是这种方式要注意binlog的文件和位置，如果修改后和之前的同步接不上，那就会丢失部分数据。所以不太常用。</p>
-</blockquote>
-<h3 id="全库同步与部分同步"><a href="#全库同步与部分同步" class="headerlink" title="全库同步与部分同步"></a>全库同步与部分同步</h3><p>首先在Master端：在my.cnf中，可以通过以下这些属性指定需要针对哪些库或者哪些表记录binlog</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line">#需要同步的二进制数据库名</span><br><span class="line">binlog-do-db=masterdemo</span><br><span class="line">#只保留7天的二进制日志，以防磁盘被日志占满(可选)</span><br><span class="line">expire-logs-days  = 7</span><br><span class="line">#不备份的数据库</span><br><span class="line">binlog-ignore-db=information_schema</span><br><span class="line">binlog-ignore-db=performation_schema</span><br><span class="line">binlog-ignore-db=sys</span><br></pre></td></tr></table></figure>
-
-<p>然后在Slave端：在my.cnf中，需要配置备份库与主服务的库的对应关系。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br></pre></td><td class="code"><pre><span class="line">#如果salve库名称与master库名相同，使用本配置</span><br><span class="line">replicate-do-db = masterdemo </span><br><span class="line">#如果master库名[mastdemo]与salve库名[mastdemo01]不同，使用以下配置[需要做映射]</span><br><span class="line">replicate-rewrite-db = masterdemo -&gt; masterdemo01</span><br><span class="line">#如果不是要全部同步[默认全部同步]，则指定需要同步的表</span><br><span class="line">replicate-wild-do-table=masterdemo01.t_dict</span><br><span class="line">replicate-wild-do-table=masterdemo01.t_num</span><br></pre></td></tr></table></figure>
-
-<h3 id="GTID同步集群"><a href="#GTID同步集群" class="headerlink" title="GTID同步集群"></a>GTID同步集群</h3><p>这种模式是从MySQL5.6版本引入的。</p>
-<p> GTID的本质也是基于Binlog来实现主从同步，只是他会基于一个全局的事务ID来标识同步进度。GTID即全局事务ID，全局唯一并且趋势递增，他可以保证为每一个在主节点上提交的事务在复制集群中可以生成一个唯一的ID 。</p>
-<p> 在基于GTID的复制中，首先从服务器会告诉主服务器已经在从服务器执行完了哪些事务的GTID值，然后主库会有把所有没有在从库上执行的事务，发送到从库上进行执行，并且使用GTID的复制可以保证同一个事务只在指定的从库上执行一次，这样可以避免由于偏移量的问题造成数据不一致。</p>
-<p> 搭建方式跟我们上面的主从架构整体搭建方式差不多。只是需要在my.cnf中修改一些配置。</p>
-<p> 在主节点上：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line">gtid_mode=on</span><br><span class="line">enforce_gtid_consistency=on</span><br><span class="line">log_bin=on</span><br><span class="line">server_id=单独设置一个</span><br><span class="line">binlog_format=row</span><br></pre></td></tr></table></figure>
-
-<p>在从节点上：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">gtid_mode=on</span><br><span class="line">enforce_gtid_consistency=on</span><br><span class="line">log_slave_updates=1</span><br><span class="line">server_id=单独设置一个</span><br></pre></td></tr></table></figure>
-
-<p>然后分别重启主服务和从服务，就可以开启GTID同步复制方式。</p>
-<h2 id="集群扩容与MySQL数据迁移"><a href="#集群扩容与MySQL数据迁移" class="headerlink" title="集群扩容与MySQL数据迁移"></a>集群扩容与MySQL数据迁移</h2><p>要扩展到一主多从的集群架构，其实就比较简单了，只需要增加一个binlog复制就行了。</p>
-<p> 但是如果集群是已经运行过一段时间，这时候如果要扩展新的从节点就有一个问题，之前的数据没办法从binlog来恢复了。这时候在扩展新的slave节点时，就需要增加一个数据复制的操作。</p>
-<p> MySQL的数据备份恢复操作相对比较简单，可以通过SQL语句直接来完成。具体操作可以使用mysql的bin目录下的mysqldump工具。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">mysqldump -u root -p --all-databases &gt; backup.sql</span><br><span class="line">#输入密码</span><br></pre></td></tr></table></figure>
-
-<p>通过这个指令，就可以将整个数据库的所有数据导出成backup.sql，然后把这个backup.sql分发到新的MySQL服务器上，并执行下面的指令将数据全部导入到新的MySQL服务中。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">mysql -u root -p &lt; backup.sql</span><br><span class="line">#输入密码</span><br></pre></td></tr></table></figure>
-
-<p> 这样新的MySQL服务就已经有了所有的历史数据，然后就可以再按照上面的步骤，配置Slave从服务的数据同步了。</p>
-<h2 id="半同步复制"><a href="#半同步复制" class="headerlink" title="半同步复制"></a>半同步复制</h2><p> MySQL主从集群默认采用的是一种异步复制的机制。主服务在执行用户提交的事务后，写入binlog日志，然后就给客户端返回一个成功的响应了。而binlog会由一个dump线程异步发送给Slave从服务。</p>
-<p>由于这个发送binlog的过程是异步的。主服务在向客户端反馈执行结果时，是不知道binlog是否同步成功了的。这时候如果主服务宕机了，而从服务还没有备份到新执行的binlog，那就有可能会丢数据。</p>
-<p> 那怎么解决这个问题呢，这就要靠MySQL的半同步复制机制来保证数据安全。</p>
-<p> 半同步复制机制是一种介于异步复制和全同步复制之前的机制。主库在执行完客户端提交的事务后，并不是立即返回客户端响应，而是等待至少一个从库接收并写到relay log中，才会返回给客户端。MySQL在等待确认时，默认会等10秒，如果超过10秒没有收到ack，就会<strong>降级成为异步复制</strong>。</p>
-<p>这种半同步复制相比异步复制，能够有效的提高数据的安全性。但是这种安全性也不是绝对的，他只保证事务提交后的binlog至少传输到了一个从库，并且并不保证从库应用这个事务的binlog是成功的。另一方面，半同步复制机制也会造成一定程度的延迟，这个延迟时间最少是一个TCP&#x2F;IP请求往返的时间。整个服务的性能是会有所下降的。而当从服务出现问题时，主服务需要等待的时间就会更长，要等到从服务的服务恢复或者请求超时才能给用户响应。</p>
-<p><img src="/img%5Cmysql%5Cmysql22.png" alt="clipboard (26)"></p>
-<h3 id="搭建半同步复制集群"><a href="#搭建半同步复制集群" class="headerlink" title="搭建半同步复制集群"></a>搭建半同步复制集群</h3><p>半同步复制需要基于特定的扩展模块来实现。而mysql从5.5版本开始，往上的版本都默认自带了这个模块。这个模块包含在mysql安装目录下的lib&#x2F;plugin目录下的semisync_master.so和semisync_slave.so两个文件中。需要在主服务上安装semisync_master模块，在从服务上安装semisync_slave模块。</p>
-<p>首先我们登陆主服务，安装semisync_master模块：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; install plugin rpl_semi_sync_master soname &#x27;semisync_master.so&#x27;;</span><br><span class="line">Query OK, 0 rows affected (0.01 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; show global variables like &#x27;rpl_semi%&#x27;;</span><br><span class="line">+-------------------------------------------+------------+</span><br><span class="line">| Variable_name                             | Value      |</span><br><span class="line">+-------------------------------------------+------------+</span><br><span class="line">| rpl_semi_sync_master_enabled              | OFF        |</span><br><span class="line">| rpl_semi_sync_master_timeout              | 10000      |</span><br><span class="line">| rpl_semi_sync_master_trace_level          | 32         |</span><br><span class="line">| rpl_semi_sync_master_wait_for_slave_count | 1          |</span><br><span class="line">| rpl_semi_sync_master_wait_no_slave        | ON         |</span><br><span class="line">| rpl_semi_sync_master_wait_point           | AFTER_SYNC |</span><br><span class="line">+-------------------------------------------+------------+</span><br><span class="line">6 rows in set, 1 warning (0.02 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; set global rpl_semi_sync_master_enabled=ON;</span><br><span class="line">Query OK, 0 rows affected (0.00 sec)</span><br></pre></td></tr></table></figure>
-
-<blockquote>
-<p>这三行指令中，第一行是通过扩展库来安装半同步复制模块，需要指定扩展库的文件名。</p>
-<p>第二行查看系统全局参数，rpl_semi_sync_master_timeout就是半同步复制时等待应答的最长等待时间，默认是10秒，可以根据情况自行调整。</p>
-<p>第三行则是打开半同步复制的开关。</p>
-<p>在第二行查看系统参数时，最后的一个参数rpl_semi_sync_master_wait_point其实表示一种半同步复制的方式。</p>
-<p>半同步复制有两种方式，一种是我们现在看到的这种默认的AFTER_SYNC方式。这种方式下，主库把日志写入binlog，并且复制给从库，然后开始等待从库的响应。从库返回成功后，主库再提交事务，接着给客户端返回一个成功响应。</p>
-<p>而另一种方式是叫做AFTER_COMMIT方式。他不是默认的。这种方式，在主库写入binlog后，等待binlog复制到从库，主库就提交自己的本地事务，再等待从库返回给自己一个成功响应，然后主库再给客户端返回响应。</p>
-</blockquote>
-<p>然后我们登陆从服务，安装smeisync_slave模块</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; install plugin rpl_semi_sync_slave soname &#x27;semisync_slave.so&#x27;;</span><br><span class="line">Query OK, 0 rows affected (0.01 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; show global variables like &#x27;rpl_semi%&#x27;;</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">| Variable_name                   | Value |</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">| rpl_semi_sync_slave_enabled     | OFF   |</span><br><span class="line">| rpl_semi_sync_slave_trace_level | 32    |</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">2 rows in set, 1 warning (0.01 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; set global rpl_semi_sync_slave_enabled = on;</span><br><span class="line">Query OK, 0 rows affected (0.00 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; show global variables like &#x27;rpl_semi%&#x27;;</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">| Variable_name                   | Value |</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">| rpl_semi_sync_slave_enabled     | ON    |</span><br><span class="line">| rpl_semi_sync_slave_trace_level | 32    |</span><br><span class="line">+---------------------------------+-------+</span><br><span class="line">2 rows in set, 1 warning (0.00 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; stop slave;</span><br><span class="line">Query OK, 0 rows affected (0.01 sec)</span><br><span class="line"></span><br><span class="line">mysql&gt; start slave;</span><br><span class="line">Query OK, 0 rows affected (0.01 sec)</span><br></pre></td></tr></table></figure>
-
-<h2 id="主从集群与读写分离"><a href="#主从集群与读写分离" class="headerlink" title="主从集群与读写分离"></a>主从集群与读写分离</h2><p>我们要注意，目前我们的这个MySQL主从集群是单向的，也就是只能从主服务同步到从服务，而从服务的数据表更是无法同步到主服务的。</p>
-<p>所以，在这种架构下，为了保证数据一致，通常会需要保证数据只在主服务上写，而从服务只进行数据读取。这个功能，就是大名鼎鼎的读写分离。但是这里要注意下，mysql主从本身是无法提供读写分离的服务的，需要由业务自己来实现。</p>
-<blockquote>
-<p>到这里可以看到，在MySQL主从架构中，是需要严格限制从服务的数据写入的，一旦从服务有数据写入，就会造成数据不一致。并且从服务在执行事务期间还很容易造成数据同步失败。</p>
-<p>如果需要限制用户写数据，我们可以在从服务中将read_only参数的值设为1( <code>set</code> <code>global read_only=1;</code> )。这样就可以限制用户写入数据。但是这个属性有两个需要注意的地方：</p>
-<p>1、read_only&#x3D;1设置的只读模式，不会影响slave同步复制的功能。 所以在MySQL slave库中设定了read_only&#x3D;1后，通过 “show slave status\G” 命令查看salve状态，可以看到salve仍然会读取master上的日志，并且在slave库中应用日志，保证主从数据库同步一致；</p>
-<p>2、read_only&#x3D;1设置的只读模式， 限定的是普通用户进行数据修改的操作，但不会限定具有super权限的用户的数据修改操作。 在MySQL中设置read_only&#x3D;1后，普通的应用用户进行insert、update、delete等会产生数据变化的DML操作时，都会报出数据库处于只读模式不能发生数据变化的错误，但具有super权限的用户，例如在本地或远程通过root用户登录到数据库，还是可以进行数据变化的DML操作； 如果需要限定super权限的用户写数据，可以设置super_read_only&#x3D;0。另外 <strong>如果要想连super权限用户的写操作也禁止，就使用”flush tables with read lock;”，这样设置也会阻止主从同步复制！</strong></p>
-</blockquote>
-<h2 id="扩展更复杂的集群结构"><a href="#扩展更复杂的集群结构" class="headerlink" title="扩展更复杂的集群结构"></a>扩展更复杂的集群结构</h2><p> 我们到这里搭建出了一个一主一从的MySQL主从同步集群，具有了数据同步的基础功能。而在生产环境中，通常会以此为基础，根据业务情况以及负载情况，搭建更大更复杂的集群。</p>
-<p> 例如<strong>为了进一步提高整个集群的读能力，可以扩展出一主多从</strong>。而为了减轻主节点进行数据同步的压力，可以继续扩展出多级从的主从集群。</p>
-<p> 而<strong>为了提高这个集群的写能力，可以搭建互主集群</strong>，即两个服务互为主从。这样不管写到哪个服务上，集群内的数据都是同步的。这样就可以用一个集群来分担写数据的压力。</p>
-<p> <strong>以此为基础，可以扩展出多主多从的集群，全方位提升集群的数据读写能力</strong>。甚至，我们也可以扩展出环形的主从集群，实现MySQL多活部署。</p>
-<p> 搭建互主集群只需要按照上面的方式，在主服务上打开一个slave进程，并且指向slave节点的binlog当前文件地址和位置。</p>
-<p><img src="/img%5Cmysql%5Cmysql23.png" alt="clipboard (27)"></p>
-<p> 另外，在我们搭建的这个主从集群中，有一个比较隐藏的问题，就是这样的主从复制之间会有延迟。这在复杂集群中，做了读写分离后，会更容易体现出来。即数据往主服务写，而读数据在从服务读。这时候这个主从复制延迟就有可能造成主库上刚插入了数据但是从库查不到。当然，这在我们目前的这个集群中是很难出现的，但是在大型集群中会很容易出现。</p>
-<p> 出现这个问题的根本在于：面向业务的主服务数据都是多线程并发写入的，而从服务是单个线程慢慢拉取binlog，这中间就会有个效率差。所以解决这个问题的关键是要让从服务也用多线程并行复制binlog数据。</p>
-<p> MySQL自5.7版本后就已经支持并行复制了。可以在从服务上设置slave_parallel_workers为一个大于0的数，然后把slave_parallel_type参数设置为LOGICAL_CLOCK，这就可以了。</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; show global variables like &#x27;slave_parallel%&#x27;;</span><br><span class="line">+------------------------+----------+</span><br><span class="line">| Variable_name          | Value    |</span><br><span class="line">+------------------------+----------+</span><br><span class="line">| slave_parallel_type    | DATABASE |</span><br><span class="line">| slave_parallel_workers | 0        |</span><br><span class="line">+------------------------+----------+</span><br><span class="line">2 rows in set (0.01 sec)</span><br></pre></td></tr></table></figure>
-
-<h1 id="其他高可用方案"><a href="#其他高可用方案" class="headerlink" title="其他高可用方案"></a>其他高可用方案</h1><p>我们之前的MySQL服务集群，都是使用MySQL自身的功能来搭建的集群。但是这样的集群，不具备高可用的功能。即如果是MySQL主服务挂了，从服务是没办法自动切换成主服务的。而如果要实现MySQL的高可用，需要借助一些第三方工具来实现。</p>
-<p> 常见的MySQL集群方案有三种: MMM、MHA、MGR。这三种高可用框架都有一些共同点：</p>
-<ul>
-<li>对主从复制集群中的Master节点进行监控</li>
-<li>自动的对Master进行迁移，通过VIP。</li>
-<li>重新配置集群中的其它slave对新的Master进行同步</li>
-</ul>
-<h2 id="MMM"><a href="#MMM" class="headerlink" title="MMM"></a>MMM</h2><p>MMM(Master-Master replication managerfor Mysql，Mysql主主复制管理器)是一套由Perl语言实现的脚本程序，可以对mysql集群进行监控和故障迁移。他需要两个Master，同一时间只有一个Master对外提供服务，可以说是主备模式。</p>
-<p> 他是通过一个VIP(虚拟IP)的机制来保证集群的高可用。整个集群中，在主节点上会通过一个VIP地址来提供数据读写服务，而当出现故障时，VIP就会从原来的主节点漂移到其他节点，由其他节点提供服务。</p>
-<p><img src="/img%5Cmysql%5Cmysql24.png" alt="MySQL-MMM"></p>
-<p>优点：</p>
-<ul>
-<li>提供了读写VIP的配置，使读写请求都可以达到高可用</li>
-<li>工具包相对比较完善，不需要额外的开发脚本</li>
-<li>完成故障转移之后可以对MySQL集群进行高可用监控</li>
-</ul>
-<p>缺点：</p>
-<ul>
-<li>故障简单粗暴，容易丢失事务，建议采用半同步复制方式，减少失败的概率</li>
-<li>目前MMM社区已经缺少维护，不支持基于GTID的复制</li>
-</ul>
-<p>适用场景：</p>
-<ul>
-<li>读写都需要高可用的</li>
-<li>基于日志点的复制方式</li>
-</ul>
-<h2 id="MHA"><a href="#MHA" class="headerlink" title="MHA"></a>MHA</h2><p>具体使用见参考文件</p>
-<p>Master High Availability Manager and Tools for MySQL。是由日本人开发的一个基于Perl脚本写的工具。这个工具专门用于监控主库的状态，当发现master节点故障时，会提升其中拥有新数据的slave节点成为新的master节点，在此期间，MHA会通过其他从节点获取额外的信息来避免数据一致性方面的问题。MHA还提供了mater节点的在线切换功能，即按需切换master-slave节点。MHA能够在30秒内实现故障切换，并能在故障切换过程中，最大程度的保证数据一致性。在淘宝内部，也有一个相似的TMHA产品。</p>
-<p>MHA是需要单独部署的，分为Manager节点和Node节点，两种节点。其中Manager节点一般是单独部署的一台机器。而Node节点一般是部署在每台MySQL机器上的。 Node节点得通过解析各个MySQL的日志来进行一些操作。</p>
-<p>Manager节点会通过探测集群里的Node节点去判断各个Node所在机器上的MySQL运行是否正常，如果发现某个Master故障了，就直接把他的一个Slave提升为Master，然后让其他Slave都挂到新的Master上去，完全透明。</p>
-<p><img src="/img%5Cmysql%5Cmysql25.png" alt="MYSQL_MHA"></p>
-<p>优点：</p>
-<ul>
-<li>MHA除了支持日志点的复制还支持GTID的方式</li>
-<li>同MMM相比，MHA会尝试从旧的Master中恢复旧的二进制日志，只是未必每次都能成功。如果希望更少的数据丢失场景，建议使用MHA架构。</li>
-</ul>
-<p>缺点：</p>
-<ul>
-<li>MHA需要自行开发VIP转移脚本。</li>
-<li>MHA只监控Master的状态，未监控Slave的状态</li>
-</ul>
-<h2 id="MGR"><a href="#MGR" class="headerlink" title="MGR"></a>MGR</h2><p>MGR：MySQL Group Replication。 是MySQL官方在5.7.17版本正式推出的一种组复制机制。主要是解决传统异步复制和半同步复制的数据一致性问题。</p>
-<p>由若干个节点共同组成一个复制组，一个事务提交后，必须经过超过半数节点的决议并通过后，才可以提交。引入组复制，主要是为了解决传统异步复制和半同步复制可能产生数据不一致的问题。MGR依靠分布式一致性协议(Paxos协议的一个变体)，实现了分布式下数据的最终一致性，提供了真正的数据高可用方案(方案落地后是否可靠还有待商榷)。</p>
-<p>支持多主模式，但官方推荐单主模式：</p>
-<ul>
-<li>多主模式下，客户端可以随机向MySQL节点写入数据</li>
-<li>单主模式下，MGR集群会选出primary节点负责写请求，primary节点与其它节点都可以进行读请求处理</li>
-</ul>
-<p><img src="/img%5Cmysql%5Cmysql26.png" alt="MYSQL_MGR"></p>
-<p>优点：</p>
-<ul>
-<li>高一致性，基于原生复制及paxos协议的组复制技术，并以插件的方式提供，提供一致数据安全保证；</li>
-<li>高容错性，只要不是大多数节点坏掉就可以继续工作，有自动检测机制，当不同节点产生资源争用冲突时，不会出现错误，按照先到者优先原则进行处理，并且内置了自动化脑裂防护机制；</li>
-<li>高扩展性，节点的新增和移除都是自动的，新节点加入后，会自动从其他节点上同步状态，直到新节点和其他节点保持一致，如果某节点被移除了，其他节点自动更新组信息，自动维护新的组信息；</li>
-<li>高灵活性，有单主模式和多主模式，单主模式下，会自动选主，所有更新操作都在主上进行；多主模式下，所有server都可以同时处理更新操作。</li>
-</ul>
-<p>缺点:</p>
-<ul>
-<li>仅支持InnoDB引擎，并且每张表一定要有一个主键，用于做write set的冲突检测；</li>
-<li>必须打开GTID特性，二进制日志格式必须设置为ROW，用于选主与write set；主从状态信息存于表中（–master-info-repository&#x3D;TABLE 、–relay-log-info-repository&#x3D;TABLE），–log-slave-updates打开；</li>
-<li>COMMIT可能会导致失败，类似于快照事务隔离级别的失败场景</li>
-<li>目前一个MGR集群最多支持9个节点</li>
-<li>不支持外键于save point特性，无法做全局间的约束检测与部分事务回滚</li>
-</ul>
-<p>适用的业务场景：</p>
-<ul>
-<li>对主从延迟比较敏感</li>
-<li>希望对对写服务提供高可用，又不想安装第三方软件</li>
-<li>数据强一致的场景</li>
-</ul>
-<h1 id="分库分表"><a href="#分库分表" class="headerlink" title="分库分表"></a>分库分表</h1><p>分库分表包含分库和分表 两个部分，而这两个部分可以统称为数据分片，其目的都是将数据拆分成不同的存储单元。另外，从分拆的角度上，可以分为垂直分片和水平分片。</p>
-<ul>
-<li>垂直分片： 按照业务来对数据进行分片，又称为纵向分片。他的核心理念就是转库专用。在拆分之前，一个数据库由多个数据表组成，每个表对应不同的业务。而拆分之后，则是按照业务将表进行归类，分布到不同的数据库或表中，从而将压力分散至不同的数据库或表。</li>
-</ul>
-<p>垂直分片往往需要对架构和设计进行调整。通常来讲，是来不及应对业务需求快速变化的。而且，他也无法真正的解决单点数据库的性能瓶颈。垂直分片可以缓解数据量和访问量带来的问题，但无法根治。如果垂直分片之后，表中的数据量依然超过单节点所能承载的阈值，则需要水平分片来进一步处理。</p>
-<ul>
-<li>水平分片：又称横向分片。相对于垂直分片，它不再将数据根据业务逻辑分类，而是通过某个字段(或某几个字段)，根据某种规则将数据分散至多个库或表中，每个分片仅包含数据的一部分。</li>
-</ul>
-<p><strong>常用的分片策略有：</strong></p>
-<p> 取余\取模 ： 优点 均匀存放数据，缺点 扩容非常麻烦</p>
-<p> 按照范围分片 ： 比较好扩容， 数据分布不够均匀</p>
-<p> 按照时间分片 ： 比较容易将热点数据区分出来。</p>
-<p> 按照枚举值分片 ： 例如按地区分片</p>
-<p> 按照目标字段前缀指定进行分区：自定义业务规则分片</p>
-<p>水平分片从理论上突破了单机数据量处理的瓶颈，并且扩展相对自由，是分库分表的标准解决方案。</p>
-<p> 一般来说，在系统设计阶段就应该根据业务耦合松紧来确定垂直分库，垂直分表方案，在数据量及访问压力不是特别大的情况，首先考虑缓存、读写分离、索引技术等方案。若数据量极大，且持续增长，再考虑水平分库水平分表方案。</p>
-<p><strong>不需要数据迁移的分片策略：</strong>普通的hash取模分片会导致难以扩容，可以先按比如月份分片，并且在redis上记录每一个月份分有有几台机器，那么取模时就按redis中的机器数，需要扩容时在redis中修改。</p>
-<h2 id="分库分表要解决哪些问题"><a href="#分库分表要解决哪些问题" class="headerlink" title="分库分表要解决哪些问题"></a>分库分表要解决哪些问题</h2><ul>
-<li><p>事务一致性问题</p>
-<p>原本单机数据库有很好的事务机制能够帮我们保证数据一致性。但是分库分表后，由于数据分布在不同库甚至不同服务器，不可避免会带来分布式事务问题。</p>
-</li>
-<li><p>跨节点关联查询问题</p>
-<p>在没有分库时，我们可以进行很容易的进行跨表的关联查询。但是在分库后，表被分散到了不同的数据库，就无法进行关联查询了。</p>
-<p>这时就需要将关联查询拆分成多次查询，然后将获得的结果进行拼装。</p>
-</li>
-<li><p>跨节点分页、排序函数</p>
-<p>跨节点多库进行查询时，limit分页、order by排序等问题，就变得比较复杂了。需要先在不同的分片节点中将数据<br>进行排序并返回，然后将不同分片返回的结果集进行汇总和再次排序。</p>
-<p>这时非常容易出现内存崩溃的问题。</p>
-</li>
-<li><p>主键避重问题</p>
-<p>在分库分表环境中，由于表中数据同时存在不同数据库中，主键值平时使用的自增长将无用武之地，某个分区数据<br>库生成的ID无法保证全局唯一。因此需要单独设计全局主键，以避免跨库主键重复问题。</p>
-</li>
-<li><p>公共表处理</p>
-<p>实际的应用场景中，参数表、数据字典表等都是数据量较小，变动少，而且属于高频联合查询的依赖表。这一类表一般就需要在每个数据库中都保存一份，并且所有对公共表的操作都要分发到所有的分库去执行。</p>
-</li>
-<li><p>运维工作量</p>
-<p>面对散乱的分库分表之后的数据，应用开发工程师和数据库管理员对数据库的操作都变得非常繁重。对于每一次数据读写操作，他们都需要知道要往哪个具体的数据库的分表去操作，这也是其中重要的挑战之一。</p>
-</li>
-</ul>
-<h2 id="什么时候需要分库分表"><a href="#什么时候需要分库分表" class="headerlink" title="什么时候需要分库分表"></a>什么时候需要分库分表</h2><p>在阿里巴巴公布的开发手册中，建议MySQL单表记录如果达到500W这个级别，或者单表容量达到2GB，一般就建议进行分库分表。而考虑到分库分表需要对数据进行再平衡，所以如果要使用分库分表，就要在系统设计之初就详细考虑好分库分表的方案，这里要分两种情况。</p>
-<p> 一般对于用户数据这一类后期增长比较缓慢的数据，一般可以按照三年左右的业务量来预估使用人数，按照标准预设好分库分表的方案。</p>
-<p> 而对于业务数据这一类增长快速且稳定的数据，一般则需要按照预估量的两倍左右预设分库分表方案。并且由于分库分表的后期扩容是非常麻烦的，所以在进行分库分表时，尽量根据情况，多分一些表。最好是计算一下数据增量，永远不用增加更多的表。</p>
-<p> 另外，在设计分库分表方案时，要尽量兼顾业务场景和数据分布。在支持业务场景的前提下，尽量保证数据能够分得更均匀。</p>
-<p> 最后，一旦用到了分库分表，就会表现为对数据查询业务的灵活性有一定的影响，例如如果按userId进行分片，那按age来进行查询，就必然会增加很多麻烦。如果再要进行排序、分页、聚合等操作，很容易就扛不住了。这时候，都要尽量在分库分表的同时，再补充设计一个降级方案，例如将数据转存一份到ES，ES可以实现更灵活的大数据聚合查询。</p>
-<h2 id="常见的分库分表组件"><a href="#常见的分库分表组件" class="headerlink" title="常见的分库分表组件"></a>常见的分库分表组件</h2><ul>
-<li>shardingsphere 官网地址：<a target="_blank" rel="noopener" href="https://shardingsphere.apache.org/document/current/cn/overview/">https://shardingsphere.apache.org/document/current/cn/overview/</a></li>
-</ul>
-<p>Sharding-JDBC是当当网研发的开源分布式数据库中间件，他是一套开源的分布式数据库中间件解决方案组成的生态圈，它由Sharding-JDBC、Sharding-Proxy和Sharding-Sidecar（计划中）这3款相互独立的产品组成。 他们均提供标准化的数据分片、分布式事务和<br>数据库治理功能，可适用于如Java同构、异构语言、容器、云原生等各种多样化的应用场景。</p>
-<ul>
-<li>mycat 官网地址： <a target="_blank" rel="noopener" href="http://www.mycat.org.cn/">http://www.mycat.org.cn/</a></li>
-</ul>
-<p>基于阿里开源的Cobar产品而研发，Cobar的稳定性、可靠性、优秀的架构和性能以及众多成熟的使用案例使得MYCAT一开始就拥有一个很好的起点，站在巨人的肩膀上，我们能看到更远。业界优秀的开源项目和创新思路被广泛融入到MYCAT的基因中，使得MYCAT在很多方面都领先于目前其他一些同类的开源项目，甚至超越某些商业产品。</p>
-<ul>
-<li>DBLE 官网地址：<a target="_blank" rel="noopener" href="https://opensource.actionsky.com/">https://opensource.actionsky.com/</a></li>
-</ul>
-<p>该网站包含几个重要产品。其中分布式中间件可以认为是MyCAT的一个增强版，专注于MySQL的集群化管理。另外还有数据传输组件和分布式事务框架组件可供选择。</p>
-<h2 id="分库分表方案设计实战"><a href="#分库分表方案设计实战" class="headerlink" title="分库分表方案设计实战"></a>分库分表方案设计实战</h2><p>一个典型的电商场景，商品管理模块大致的功能组件如下图：</p>
-<p><img src="/img%5Cmysql%5Cmysql27.png" alt="clipboard (28)"></p>
-<p> 针对这个场景，考虑到商品信息会持续增长，越来越多的情况，要如何设计分库分表方案？</p>
-<p>1、以业务为单位考虑对数据进行垂直分片，店铺、产品、商品三种业务数据垂直拆分成三个不同的库。字典表作为广播表冗余到三个不同的库中。</p>
-<p>2、考虑数据增长情况，商品将会是以后增长最快的数据，店铺和产品的数据增速会逐渐降低。所以对商品表进行分片。</p>
-<p>3、将关联性较强的商品信息表和商品补充信息表配置为绑定表。整体分库分表大致如下图：</p>
-<p><img src="/img%5Cmysql%5Cmysql28.png" alt="clipboard (29)"></p>
-<p><strong>思考：</strong></p>
-<p>对于两个库，每个库中两张表的分库分表策略，要如何定制分片策略将数据均匀分配到四个表中？参考资料中application02.propertie</p>
-<p>这种分库分表解决了哪些问题？支持的场景有哪些？不支持的场景有哪些？</p>
-<h2 id="分库分表与多数据源切换"><a href="#分库分表与多数据源切换" class="headerlink" title="分库分表与多数据源切换"></a>分库分表与多数据源切换</h2><p> 比如在电商网站中可能会有这样的需求：根据用户所在城市不同，查询不同城市的商品数据。而在后台，这些不同城市的数据被分配在不同的数据库当中。</p>
-<p> 这种场景就是一个典型的多数据源切换的场景。但是我们仔细分析这样的场景，他跟分库分表其实并不太相同。ShardingJDBC固然可以使用Hint策略实现快速的数据库分库查询。例如前端传进来一个cityId字段，然后在后台查询数据时，将cityId设置到HintManager中，通过定制Hint策略，将后续的SQL操作分配到目标数据源当中。</p>
-<blockquote>
-<p>参考资料中用AbstractDataSource实现数据源动态切换</p>
-</blockquote>
-<p> 但是，其实这种场景跟分库分表还是有差距的。分库分表关注的是数据的分布情况，而这种动态数据源切换的场景，只关注数据源分布，并不关心SQL语句是什么样的。所以一方面，这种场景下使用分库分表，需要给每个表都配置一个分库策略，会比较麻烦。另一方面，如果业务场景比较复杂，SQL语句也会多种多样。这些场景下，每写一个业务场景都需要考虑ShardingJDBC会如何转发SQL，如何改写SQL等等一系列的业务逻辑。比如Insert,Update,Delete这样的修改数据的SQL需要考虑是不是需要配置广播表，比如多表关联的复杂查询SQL需要时刻考虑是不是需要绑定表。</p>
-<p> 从架构层面考虑，数据库应该只是对业务的一个支撑工具，不应该影响到业务层的逻辑。而使用ShardingJDBC后，数据库层面针对分库分表的各种处理逻辑就被蔓延到了业务层，这种方式其实就是不太合适的。相反，使用示例中的数据源切换方式，数据库层对业务层的影响就被极大的压缩，只需要考虑数据源的问题，而不存在对SQL以及数据分布的影响。</p>
-<p> 所以，对于分库分表这种解决方案，一定需要结合实际业务场景，谨慎使用。比如ShardingSphere框架，如果不能全面把握好他的实现机制，就最好不要直接使用。在使用时，也尽量是针对最核心的数据，尽量控制影响范围。</p>
-<h1 id="ShardingSphere"><a href="#ShardingSphere" class="headerlink" title="ShardingSphere"></a>ShardingSphere</h1><p>ShardingSphere包含三个重要的产品，ShardingJDBC、ShardingProxy和ShardingSidecar。其中sidecar是针对service mesh定位的一个分库分表插件，目前在规划中。</p>
-<p> 其中，ShardingJDBC是用来做客户端分库分表的产品，而ShardingProxy是用来做服务端分库分表的产品。</p>
-<table>
-<thead>
-<tr>
-<th></th>
-<th>Sharding-JDBC</th>
-<th>Sharding-Proxy</th>
-</tr>
-</thead>
-<tbody><tr>
-<td>数据库</td>
-<td>任意</td>
-<td>MySQL&#x2F;PostgreSQL</td>
-</tr>
-<tr>
-<td>连接消耗数</td>
-<td>高</td>
-<td>低</td>
-</tr>
-<tr>
-<td>异构语言</td>
-<td>仅java</td>
-<td>任意</td>
-</tr>
-<tr>
-<td>性能</td>
-<td>损耗低</td>
-<td>损耗略高</td>
-</tr>
-<tr>
-<td>无中心化</td>
-<td>是</td>
-<td>否</td>
-</tr>
-<tr>
-<td>静态入口</td>
-<td>无</td>
-<td>有</td>
-</tr>
-</tbody></table>
-<h2 id="ShardingJDBC"><a href="#ShardingJDBC" class="headerlink" title="ShardingJDBC"></a>ShardingJDBC</h2><p>ShardingJDBC是整个ShardingSphere最早也是最为核心的一个功能模块，他的主要功能就是数据分片和读写分离，通过ShardingJDBC，应用可以透明的使用JDBC访问已经分库分表、读写分离的多个数据源，而不用关心数据源的数量以及数据如何分布。</p>
-<h3 id="核心概念"><a href="#核心概念" class="headerlink" title="核心概念"></a>核心概念</h3><ul>
-<li>逻辑表：水平拆分的数据库的相同逻辑和数据结构表的总称</li>
-<li>真实表：在分片的数据库中真实存在的物理表。</li>
-<li>数据节点：数据分片的最小单元。由数据源名称和数据表组成</li>
-<li>绑定表：分片规则一致的主表和子表。</li>
-<li>广播表：也叫公共表，指所有的分片数据源中都存在的表，表结构和表中的数据在每个数据库中都完全一致。例如字典表。</li>
-<li>分片键：用于分片的数据库字段，是将数据库(表)进行水平拆分的关键字段。SQL中若没有分片字段，将会执行全路由，性能会很差。</li>
-<li>分片算法：通过分片算法将数据进行分片，支持通过&#x3D;、BETWEEN和IN分片。分片算法需要由应用开发者自行实现，可实现的灵活度非常高。</li>
-<li>分片策略：真正用于进行分片操作的是分片键+分片算法，也就是分片策略。在ShardingJDBC中一般采用基于Groovy表达式的inline分片策略，通过一个包含分片键的算法表达式来制定分片策略，如t_user_$-&gt;{u_id%8}标识根据u_id模8，分成8张表，表名称为t_user_0到t_user_7。</li>
-</ul>
-<h2 id="实战案例"><a href="#实战案例" class="headerlink" title="实战案例"></a>实战案例</h2><p>见参考资料ShardingDemo4</p>
-<p>application01.properties文件的内容：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br></pre></td><td class="code"><pre><span class="line">#垂直分表策略</span><br><span class="line"># 配置真实数据源</span><br><span class="line">spring.shardingsphere.datasource.names=m1</span><br><span class="line"></span><br><span class="line"># 配置第 1 个数据源</span><br><span class="line">spring.shardingsphere.datasource.m1.type=com.alibaba.druid.pool.DruidDataSource</span><br><span class="line">spring.shardingsphere.datasource.m1.driver-class-name=com.mysql.cj.jdbc.Driver</span><br><span class="line">spring.shardingsphere.datasource.m1.url=jdbc:mysql://localhost:3306/coursedb?serverTimezone=GMT%2B8</span><br><span class="line">spring.shardingsphere.datasource.m1.username=root</span><br><span class="line">spring.shardingsphere.datasource.m1.password=root</span><br><span class="line"></span><br><span class="line"># 指定表的分布情况 配置表在哪个数据库里，表名是什么。水平分表，分两个表：m1.course_1,m1.course_2</span><br><span class="line">spring.shardingsphere.sharding.tables.course.actual-data-nodes=m1.course_$-&gt;&#123;1..2&#125;</span><br><span class="line"></span><br><span class="line"># 指定表的主键生成策略</span><br><span class="line">spring.shardingsphere.sharding.tables.course.key-generator.column=cid</span><br><span class="line">spring.shardingsphere.sharding.tables.course.key-generator.type=SNOWFLAKE</span><br><span class="line">#雪花算法的一个可选参数</span><br><span class="line">spring.shardingsphere.sharding.tables.course.key-generator.props.worker.id=1</span><br><span class="line"></span><br><span class="line">#使用自定义的主键生成策略</span><br><span class="line">#spring.shardingsphere.sharding.tables.course.key-generator.type=MYKEY</span><br><span class="line">#spring.shardingsphere.sharding.tables.course.key-generator.props.mykey-offset=88</span><br><span class="line"></span><br><span class="line">#指定分片策略 约定cid值为偶数添加到course_1表。如果是奇数添加到course_2表。</span><br><span class="line"># 选定计算的字段</span><br><span class="line">spring.shardingsphere.sharding.tables.course.table-strategy.inline.sharding-column= cid</span><br><span class="line"># 根据计算的字段算出对应的表名。</span><br><span class="line">spring.shardingsphere.sharding.tables.course.table-strategy.inline.algorithm-expression=course_$-&gt;&#123;cid%2+1&#125;</span><br><span class="line"></span><br><span class="line"># 打开sql日志输出。</span><br><span class="line">spring.shardingsphere.props.sql.show=true</span><br><span class="line"></span><br><span class="line">spring.main.allow-bean-definition-overriding=true</span><br></pre></td></tr></table></figure>
-
-<blockquote>
-<p>1、首先定义一个数据源m1，并对m1进行实际的JDBC参数配置</p>
-<p>2、spring.shardingsphere.sharding.tables.course开头的一系列属性即定义了一个名为course的逻辑表。</p>
-<p>actual-data-nodes属性即定义course逻辑表的实际数据分布情况，他分布在m1.course_1和m1.course_2两个表。</p>
-<p>key-generator属性配置了他的主键列以及主键生成策略。ShardingJDBC默认提供了UUID和SNOWFLAKE两种分布式主键生成策略。</p>
-<p>table-strategy属性即配置他的分库分表策略。分片键为cid属性。分片算法为course_$-&gt;{cid%2+1}，表示按照cid模2+1的结果，然后加上前面的course__ 部分作为前缀就是他的实际表结果。注意，这个表达式计算出来的结果需要能够与实际数据分布中的一种情况对应上，否则就会报错。</p>
-<p>sql.show属性表示要在日志中打印实际SQL</p>
-<p>3、coursedb的表结构见示例中sql文件夹中的sql语句。</p>
-</blockquote>
-<p>其他文件内容：</p>
-<ul>
-<li>application02.properties: 分库分表示例配置。内置分片算法示例， inline、standard、complex、hint。广播表配置示例。</li>
-<li>application03.properties: 绑定表示例配置</li>
-<li>application04.properties: 读写分离示例配置</li>
-</ul>
-<h2 id="ShardingJDBC的分片算法"><a href="#ShardingJDBC的分片算法" class="headerlink" title="ShardingJDBC的分片算法"></a>ShardingJDBC的分片算法</h2><p>ShardingSphere目前提供了一共五种分片策略：</p>
-<ul>
-<li><p>NoneShardingStrategy</p>
-<p>不分片。这种严格来说不算是一种分片策略了。只是ShardingSphere也提供了这么一个配置。</p>
-</li>
-<li><p>InlineShardingStrategy</p>
-<p>最常用的分片方式</p>
-<ul>
-<li>配置参数： inline.shardingColumn 分片键；inline.algorithmExpression 分片表达式</li>
-<li>实现方式： 按照分片表达式来进行分片。</li>
-</ul>
-</li>
-<li><p>StandardShardingStrategy</p>
-<p>只支持单分片键的标准分片策略。</p>
-<ul>
-<li><p>配置参数：standard.sharding-column 分片键；standard.precise-algorithm-class-name 精确分片算法类名；standard.range-algorithm-class-name 范围分片算法类名</p>
-</li>
-<li><p>实现方式：</p>
-<p>shardingColumn指定分片算法。</p>
-<p>preciseAlgorithmClassName 指向一个实现了io.shardingsphere.api.algorithm.sharding.standard.PreciseShardingAlgorithm接口的java类名，提供按照 &#x3D; 或者 IN 逻辑的精确分片 <code>示例：见参考资料com.roy.shardingDemo.algorithm.MyPreciseShardingAlgorithm</code></p>
-<p>rangeAlgorithmClassName 指向一个实现了 io.shardingsphere.api.algorithm.sharding.standard.RangeShardingAlgorithm接口的java类名，提供按照Between 条件进行的范围分片。<code>示例：见参考资料com.roy.shardingDemo.algorithm.MyRangeShardingAlgorithm</code></p>
-</li>
-<li><p>说明：</p>
-<p>其中精确分片算法是必须提供的，而范围分片算法则是可选的。</p>
-</li>
-</ul>
-</li>
-<li><p>ComplexShardingStrategy</p>
-<p>支持多分片键的复杂分片策略。</p>
-<ul>
-<li><p>配置参数：complex.sharding-columns 分片键(多个); complex.algorithm-class-name 分片算法实现类。</p>
-</li>
-<li><p>实现方式：</p>
-<p>shardingColumn指定多个分片列。</p>
-<p>algorithmClassName指向一个实现了org.apache.shardingsphere.api.sharding.complex.ComplexKeysShardingAlgorithm接口的java类名。提供按照多个分片列进行综合分片的算法。<code>示例：com.roy.shardingDemo.algorithm.MyComplexKeysShardingAlgorithm</code></p>
-</li>
-</ul>
-</li>
-<li><p>HintShardingStrategy</p>
-<p>不需要分片键的强制分片策略。这个分片策略，简单来理解就是说，他的分片键不再跟SQL语句相关联，而是用程序另行指定。对于一些复杂的情况，例如select count(*) from (select userid from t_user where userid in (1,3,5,7,9)) 这样的SQL语句，就没法通过SQL语句来指定一个分片键。这个时候就可以通过程序，给他另行执行一个分片键，例如在按userid奇偶分片的策略下，可以指定1作为分片键，然后自行指定他的分片策略。</p>
-<ul>
-<li><p>配置参数：hint.algorithm-class-name 分片算法实现类。</p>
-</li>
-<li><p>实现方式：</p>
-<p>algorithmClassName指向一个实现了org.apache.shardingsphere.api.sharding.hint.HintShardingAlgorithm接口的java类名。 <code>示例：com.roy.shardingDemo.algorithm.MyHintShardingAlgorithm</code></p>
-<p>在这个算法类中，同样是需要分片键的。而分片键的指定是通过HintManager.addDatabaseShardingValue方法(分库)和HintManager.addTableShardingValue(分表)来指定。</p>
-<p>使用时要注意，这个分片键是线程隔离的，只在当前线程有效，所以通常建议使用之后立即关闭，或者用try资源方式打开。</p>
-</li>
-</ul>
-</li>
-</ul>
-<blockquote>
-<p>而Hint分片策略并没有完全按照SQL解析树来构建分片策略，是绕开了SQL解析的，所有对某些比较复杂的语句，Hint分片策略性能有可能会比较好(情况太多了，无法一一分析)。</p>
-<p>但是要注意，Hint强制路由在使用时有非常多的限制：</p>
-<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">-- 不支持UNION</span><br><span class="line">SELECT * FROM t_order1 UNION SELECT * FROM t_order2</span><br><span class="line">INSERT INTO tbl_name (col1, col2, …) SELECT col1, col2, … FROM tbl_name WHERE col3 = ?</span><br><span class="line"></span><br><span class="line">-- 不支持多层子查询</span><br><span class="line">SELECT COUNT(*) FROM (SELECT * FROM t_order o WHERE o.id IN (SELECT id FROM t_order WHERE status = ?))</span><br><span class="line"></span><br><span class="line">-- 不支持函数计算。ShardingSphere只能通过SQL字面提取用于分片的值</span><br><span class="line">SELECT * FROM t_order WHERE to_date(create_time, &#x27;yyyy-mm-dd&#x27;) = &#x27;2019-01-01&#x27;;</span><br></pre></td></tr></table></figure>
-</blockquote>
-<h2 id="ShardingSphere的SQL使用限制"><a href="#ShardingSphere的SQL使用限制" class="headerlink" title="ShardingSphere的SQL使用限制"></a>ShardingSphere的SQL使用限制</h2><p>参见官网文档： <a target="_blank" rel="noopener" href="https://shardingsphere.apache.org/document/current/cn/features/sharding/use-norms/sql/">https://shardingsphere.apache.org/document/current/cn/features/sharding/use-norms/sql/</a> 文档中详细列出了非常多ShardingSphere目前版本支持和不支持的SQL类型。这些东西要经常关注。</p>
-<p><strong>支持的SQL</strong></p>
-<table>
-<thead>
-<tr>
-<th align="left">SQL</th>
-<th align="left">必要条件</th>
-</tr>
-</thead>
-<tbody><tr>
-<td align="left">SELECT * FROM tbl_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT * FROM tbl_name WHERE (col1 &#x3D; ? or col2 &#x3D; ?) and col3 &#x3D; ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT * FROM tbl_name WHERE col1 &#x3D; ? ORDER BY col2 DESC LIMIT ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(*), SUM(col1), MIN(col1), MAX(col1), AVG(col1) FROM tbl_name WHERE col1 &#x3D; ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(col1) FROM tbl_name WHERE col2 &#x3D; ? GROUP BY col1 ORDER BY col3 DESC LIMIT ?, ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">INSERT INTO tbl_name (col1, col2,…) VALUES (?, ?, ….)</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">INSERT INTO tbl_name VALUES (?, ?,….)</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">INSERT INTO tbl_name (col1, col2, …) VALUES (?, ?, ….), (?, ?, ….)</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">INSERT INTO tbl_name (col1, col2, …) SELECT col1, col2, … FROM tbl_name WHERE col3 &#x3D; ?</td>
-<td align="left">INSERT表和SELECT表必须为相同表或绑定表</td>
-</tr>
-<tr>
-<td align="left">REPLACE INTO tbl_name (col1, col2, …) SELECT col1, col2, … FROM tbl_name WHERE col3 &#x3D; ?</td>
-<td align="left">REPLACE表和SELECT表必须为相同表或绑定表</td>
-</tr>
-<tr>
-<td align="left">UPDATE tbl_name SET col1 &#x3D; ? WHERE col2 &#x3D; ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">DELETE FROM tbl_name WHERE col1 &#x3D; ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">CREATE TABLE tbl_name (col1 int, …)</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">ALTER TABLE tbl_name ADD col1 varchar(10)</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">DROP TABLE tbl_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">TRUNCATE TABLE tbl_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">CREATE INDEX idx_name ON tbl_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">DROP INDEX idx_name ON tbl_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">DROP INDEX idx_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT DISTINCT * FROM tbl_name WHERE col1 &#x3D; ?</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(DISTINCT col1) FROM tbl_name</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">SELECT subquery_alias.col1 FROM (select tbl_name.col1 from tbl_name where tbl_name.col2&#x3D;?) subquery_alias</td>
-<td align="left"></td>
-</tr>
-</tbody></table>
-<p><strong>不支持的SQL</strong></p>
-<table>
-<thead>
-<tr>
-<th align="left">SQL</th>
-<th align="left">不支持原因</th>
-</tr>
-</thead>
-<tbody><tr>
-<td align="left">INSERT INTO tbl_name (col1, col2, …) VALUES(1+2, ?, …)</td>
-<td align="left">VALUES语句不支持运算表达式</td>
-</tr>
-<tr>
-<td align="left">INSERT INTO tbl_name (col1, col2, …) SELECT * FROM tbl_name WHERE col3 &#x3D; ?</td>
-<td align="left">SELECT子句暂不支持使用*号简写及内置的分布式主键生成器</td>
-</tr>
-<tr>
-<td align="left">REPLACE INTO tbl_name (col1, col2, …) SELECT * FROM tbl_name WHERE col3 &#x3D; ?</td>
-<td align="left">SELECT子句暂不支持使用*号简写及内置的分布式主键生成器</td>
-</tr>
-<tr>
-<td align="left">SELECT * FROM tbl_name1 UNION SELECT * FROM tbl_name2</td>
-<td align="left">UNION</td>
-</tr>
-<tr>
-<td align="left">SELECT * FROM tbl_name1 UNION ALL SELECT * FROM tbl_name2</td>
-<td align="left">UNION ALL</td>
-</tr>
-<tr>
-<td align="left">SELECT SUM(DISTINCT col1), SUM(col1) FROM tbl_name</td>
-<td align="left">详见DISTINCT支持情况详细说明</td>
-</tr>
-<tr>
-<td align="left">SELECT * FROM tbl_name WHERE to_date(create_time, ‘yyyy-mm-dd’) &#x3D; ?</td>
-<td align="left">会导致全路由</td>
-</tr>
-<tr>
-<td align="left">(SELECT * FROM tbl_name)</td>
-<td align="left">暂不支持加括号的查询</td>
-</tr>
-<tr>
-<td align="left">SELECT MAX(tbl_name.col1) FROM tbl_name</td>
-<td align="left">查询列是函数表达式时,查询列前不能使用表名;若查询表存在别名,则可使用表的别名</td>
-</tr>
-</tbody></table>
-<p><strong>DISTINCT支持情况详细说明</strong></p>
-<p><strong>支持的SQL</strong></p>
-<table>
-<thead>
-<tr>
-<th align="left">SQL</th>
-</tr>
-</thead>
-<tbody><tr>
-<td align="left">SELECT DISTINCT * FROM tbl_name WHERE col1 &#x3D; ?</td>
-</tr>
-<tr>
-<td align="left">SELECT DISTINCT col1 FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT DISTINCT col1, col2, col3 FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT DISTINCT col1 FROM tbl_name ORDER BY col1</td>
-</tr>
-<tr>
-<td align="left">SELECT DISTINCT col1 FROM tbl_name ORDER BY col2</td>
-</tr>
-<tr>
-<td align="left">SELECT DISTINCT(col1) FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT AVG(DISTINCT col1) FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT SUM(DISTINCT col1) FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(DISTINCT col1) FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(DISTINCT col1) FROM tbl_name GROUP BY col1</td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(DISTINCT col1 + col2) FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(DISTINCT col1), SUM(DISTINCT col1) FROM tbl_name</td>
-</tr>
-<tr>
-<td align="left">SELECT COUNT(DISTINCT col1), col1 FROM tbl_name GROUP BY col1</td>
-</tr>
-<tr>
-<td align="left">SELECT col1, COUNT(DISTINCT col1) FROM tbl_name GROUP BY col1</td>
-</tr>
-</tbody></table>
-<p><strong>不支持的SQL</strong></p>
-<table>
-<thead>
-<tr>
-<th align="left">SQL</th>
-<th align="left">不支持原因</th>
-</tr>
-</thead>
-<tbody><tr>
-<td align="left">SELECT SUM(DISTINCT tbl_name.col1), SUM(tbl_name.col1) FROM tbl_name</td>
-<td align="left">查询列是函数表达式时,查询列前不能使用表名;若查询表存在别名,则可使用表的别名</td>
-</tr>
-</tbody></table>
-<h2 id="分库分表带来的问题"><a href="#分库分表带来的问题" class="headerlink" title="分库分表带来的问题"></a>分库分表带来的问题</h2><p> 1、分库分表，其实围绕的都是一个核心问题，就是单机数据库容量的问题。我们要了解，在面对这个问题时，解决方案是很多的，并不止分库分表这一种。但是ShardingSphere的这种分库分表，是希望在软件层面对硬件资源进行管理，从而便于对数据库的横向扩展，这无疑是成本很小的一种方式。</p>
-<p> 2、一般情况下，如果单机数据库容量撑不住了，应先从缓存技术着手降低对数据库的访问压力。如果缓存使用过后，数据库访问量还是非常大，可以考虑数据库读写分离策略。如果数据库压力依然非常大，且业务数据持续增长无法估量，最后才考虑分库分表，单表拆分数据应控制在1000万以内。</p>
-<p> 当然，随着互联网技术的不断发展，处理海量数据的选择也越来越多。在实际进行系统设计时，最好是用MySQL数据库只用来存储关系性较强的热点数据，而对海量数据采取另外的一些分布式存储产品。例如PostGreSQL、VoltDB甚至HBase、Hive、ES等这些大数据组件来存储。</p>
-<p> 3、从上一部分ShardingJDBC的分片算法中我们可以看到，由于SQL语句的功能实在太多太全面了，所以分库分表后，对SQL语句的支持，其实是步步为艰的，稍不小心，就会造成SQL语句不支持、业务数据混乱等很多很多问题。所以，实际使用时，我们会建议这个分库分表，能不用就尽量不要用。</p>
-<p> 如果要使用优先在OLTP场景下使用，优先解决大量数据下的查询速度问题。而在OLAP场景中，通常涉及到非常多复杂的SQL，分库分表的限制就会更加明显。当然，这也是ShardingSphere以后改进的一个方向。</p>
-<p> 4、如果确定要使用分库分表，就应该在系统设计之初开始对业务数据的耦合程度和使用情况进行考量，尽量控制业务SQL语句的使用范围，将数据库往简单的增删改查的数据存储层方向进行弱化。并首先详细规划垂直拆分的策略，使数据层架构清晰明了。而至于水平拆分，会给后期带来非常非常多的数据问题，所以应该谨慎、谨慎再谨慎。一般也就在日志表、操作记录表等很少的一些边缘场景才偶尔用用。</p>
-
+<h1 id="InnoDB"><a href="#InnoDB" class="headerlink" title="InnoDB"></a>InnoDB</h1><h2 id="查询成本计算"><a href="#查询成本计算" class="headerlink" title="查询成本计算"></a>查询成本计算</h2><p><strong>I&#x2F;O成本</strong>：从磁盘到内存这个加载的过程损耗的时间称之为I&#x2F;O成本。</p>
+<p><strong>CPU成本</strong>：读取以及检测记录是否满足对应的搜索条件、对结果集进行排序等这些操作损耗的时间称之为CPU成本。</p>
+<p>对于InnoDB存储引擎来说，页是磁盘和内存之间交互的基本单位，MySQL规定读取一个页面花费的成本默认是1.0(I&#x2F;O)，读取以及检测一条记录是否符合搜索条件的成本默认是0.2(CPU)。</p>
+<h3 id="trace分析sql"><a href="#trace分析sql" class="headerlink" title="trace分析sql"></a>trace分析sql</h3><figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">mysql&gt; set session optimizer_trace=&quot;enabled=on&quot;,end_markers_in_json=on; ‐‐开启trace</span><br><span class="line">#两句一起执行</span><br><span class="line">mysql&gt; 查询语句</span><br><span class="line">mysql&gt; SELECT * FROM information_schema.OPTIMIZER_TRACE;</span><br></pre></td></tr></table></figure>
+    
+    <a class="article-more-a" href="/2022/10/01/Mysql_note/#more">more >></a>
+    
     
 
     
@@ -842,7 +246,7 @@
 
     
     <p class="article-more-link">
-      <a class="article-more-a" href="/2022/10/01/Mysql_sharding_note/">展开全文 >></a>
+      <a class="article-more-a" href="/2022/10/01/Mysql_note/">展开全文 >></a>
     </p>
     
 
@@ -2180,11 +1584,11 @@
           <ul class="article-tag-list" q-show="showTags">
              
               <li class="article-tag-list-item">
-                <a href="javascript:void(0)" class="js-tag color4">Activiti</a>
+                <a href="javascript:void(0)" class="js-tag color3">笔记</a>
               </li>
              
               <li class="article-tag-list-item">
-                <a href="javascript:void(0)" class="js-tag color3">笔记</a>
+                <a href="javascript:void(0)" class="js-tag color4">Activiti</a>
               </li>
              
               <li class="article-tag-list-item">
@@ -2200,11 +1604,11 @@
               </li>
              
               <li class="article-tag-list-item">
-                <a href="javascript:void(0)" class="js-tag color3">框架</a>
+                <a href="javascript:void(0)" class="js-tag color1">计算机基础</a>
               </li>
              
               <li class="article-tag-list-item">
-                <a href="javascript:void(0)" class="js-tag color1">计算机基础</a>
+                <a href="javascript:void(0)" class="js-tag color3">框架</a>
               </li>
              
               <li class="article-tag-list-item">
@@ -2416,16 +1820,6 @@
   <!-- <script async type="text/javascript" size="90" alpha="0.2" zIndex="0" src="/plugins/ribbon.js/ribbon.min.js"></script> -->
   
   
-  
-  <script type="text/javascript" src="/lib/snow.js"></script>
-  <script type="text/javascript" src="/lib/jquery-2.1.4.min.js"></script>
-  <script>
-    snow.down();
-    $(window).resize(function() {
-      $("canvas").css("z-index","500").remove();
-      snow.down();
-    });
-  </script>
   
 </body>
 
